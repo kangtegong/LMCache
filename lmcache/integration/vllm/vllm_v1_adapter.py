@@ -1342,6 +1342,12 @@ class LMCacheConnectorV1Impl:
         self._invalid_block_ids.clear()
         return invalid_blocks
 
+    def get_kv_events(self):
+        # Compatibility shim for vLLM >=0.13's bundled LMCache connector, which
+        # calls get_kv_events() for KV-cache-event telemetry. LMCache 0.3.10 does
+        # not track these events; returning None disables the (optional) feature.
+        return None
+
     @_lmcache_nvtx_annotate
     def shutdown(self):
         # Standard
