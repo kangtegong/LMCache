@@ -127,6 +127,18 @@ if hasattr(torch, "float8_e5m2fnuz"):
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
 
+def _chunk_hash_to_str(chunk_hash) -> str:
+    """Render a chunk hash for use in string keys / disk filenames.
+
+    chunk_hash is an int for LMCache's builtin hashing but bytes for vLLM
+    content-based hashes (e.g. sha256). Format each without raising: int -> hex
+    digits, bytes -> hex string. (`f"{x:x}"` fails on bytes with TypeError.)
+    """
+    if isinstance(chunk_hash, (bytes, bytearray)):
+        return chunk_hash.hex()
+    return format(chunk_hash, "x")
+
+
 def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
 
@@ -197,9 +209,14 @@ class CacheEngineKey:
         return False
 
     def to_string(self):
+        # chunk_hash may be an int (LMCache builtin hash) or bytes (vLLM
+        # content-based hashes such as sha256). `:x` only works on ints, so
+        # hex-encode bytes explicitly; otherwise the disk backend's filename
+        # generation raises TypeError and silently drops every store.
+        chunk_hash_str = _chunk_hash_to_str(self.chunk_hash)
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
+            f"@{self.worker_id}@{chunk_hash_str}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
@@ -338,9 +355,10 @@ class LayerCacheEngineKey(CacheEngineKey):
         return False
 
     def to_string(self):
+        chunk_hash_str = _chunk_hash_to_str(self.chunk_hash)
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}@{self.layer_id}"
+            f"@{self.worker_id}@{chunk_hash_str}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]

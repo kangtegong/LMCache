@@ -641,7 +641,14 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        location = None
+        # Track the location (storage backend) of EACH chunk. Multi-location is
+        # supported: a chunk may live on a different backend than its neighbours
+        # (e.g. a small local_cpu hot cache + a large local_disk / ukp_pool tier,
+        # or the UKP unified pool where chunks are bandwidth-distributed). The
+        # per-chunk location list is passed to layerwise_batched_get, which reads
+        # each layer's chunks from their respective backends and reassembles them
+        # in chunk order.
+        chunk_locations: List[str] = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -653,15 +660,7 @@ class LMCacheEngine:
 
             # NOTE: Only check the first layer
             if current_location := self.storage_manager.contains(keys_multi_layer[0]):
-                if location is None:
-                    location = current_location
-                else:
-                    # TODO(Jiayi): Support multi-location retrieval in the future
-                    assert location == current_location, (
-                        "All retrieved keys should be from the same location "
-                        "when use layerwise retrieval."
-                        "Please support multi-location retrieval in the future."
-                    )
+                chunk_locations.append(current_location)
             else:
                 break
 
@@ -677,7 +676,7 @@ class LMCacheEngine:
 
             get_generator = self.storage_manager.layerwise_batched_get(
                 keys_layer_major,
-                location=location,
+                locations=chunk_locations,
             )
 
             assert isinstance(

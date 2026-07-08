@@ -469,6 +469,7 @@ class StorageManager:
     def layerwise_batched_get(
         self,
         keys: List[List[CacheEngineKey]],
+        locations: Optional[List[str]] = None,
         location: Optional[str] = None,
     ) -> Generator[Future, None, None]:
         """
@@ -481,22 +482,44 @@ class StorageManager:
             dimension corresponds to the number of layers, and the second
             dimension corresponds to the number of chunks.
 
+        :param Optional[List[str]] locations: The storage-backend name of each
+            CHUNK (multi-location retrieval). Chunk i of every layer is read from
+            ``self.storage_backends[locations[i]]``. This lets a request whose KV
+            spans multiple backends (small cpu hot cache + disk/pool overflow, or
+            the bandwidth-distributed UKP pool) be retrieved layerwise. Falls back
+            to ``location`` (or LocalCPUBackend) for all chunks when not given.
+
         :return: A generator that yields a future for each layer.
         """
-        if location is None:
-            location = "LocalCPUBackend"
+        assert self.async_serializer is not None, (
+            "Async serializer must be initialized via post_init before using "
+            "layerwise_batched_get."
+        )
+        n_chunks = len(keys[0]) if keys else 0
+        if locations is None:
+            locations = [location or "LocalCPUBackend"] * n_chunks
+        # Group chunk indices by their owning backend once (same for every layer).
+        by_loc: Dict[str, List[int]] = {}
+        for idx, loc in enumerate(locations):
+            by_loc.setdefault(loc, []).append(idx)
+
+        backends = self.storage_backends
+
         for keys_multi_chunk in keys:
-            # Retrieve all chunks for one layer
-            backend = self.storage_backends[location]
-            # TODO(Jiayi): need to make async loading and layerwise compatible
-            assert self.async_serializer is not None, (
-                "Async serializer must be initialized via post_init before using "
-                "layerwise_batched_get."
-            )
-            coro = self.async_serializer.run(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
-                len(keys_multi_chunk),
-            )
+            # Retrieve this layer's chunks from each backend, reassembled in the
+            # original chunk order (single await round-trip if all one backend).
+            async def _gather(kmc=keys_multi_chunk):
+                result: List[Any] = [None] * len(kmc)
+                for loc, idxs in by_loc.items():
+                    ks = [kmc[i] for i in idxs]
+                    objs = await backends[loc].batched_get_non_blocking(
+                        "fake_lookup_id", ks
+                    )
+                    for i, obj in zip(idxs, objs):
+                        result[i] = obj
+                return result
+
+            coro = self.async_serializer.run(_gather(), len(keys_multi_chunk))
             task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
 
